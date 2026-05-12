@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+
+def load_table(path: Path, min_cols: int) -> np.ndarray:
+    x = np.loadtxt(path, comments="#")
+    if x.ndim == 1:
+        x = x.reshape(1, -1)
+    if x.shape[1] < min_cols:
+        raise RuntimeError(f"{path} must have at least {min_cols} columns")
+    return x.astype(float)
+
+
+def positive(*xs: np.ndarray) -> np.ndarray:
+    m = np.ones(xs[0].shape, dtype=bool)
+    for x in xs:
+        m &= np.isfinite(x) & (x > 0)
+    return m
+
+
+def fit_loglog(x: np.ndarray, y: np.ndarray):
+    lx = np.log10(x)
+    ly = np.log10(y)
+    a, b = np.polyfit(lx, ly, 1)
+    r = ly - (a * lx + b)
+    rmse = float(np.sqrt(np.mean(r * r)))
+    var = float(np.sum(r * r) / max(1, len(x) - 2))
+    return float(a), float(b), rmse, var
+
+
+def scale(vals):
+    x = np.asarray(vals, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.finfo(float).eps
+    y = float(np.median(x))
+    return y if y > 0 and np.isfinite(y) else np.finfo(float).eps
+
+
+def analyze_sk(path: Path, p: dict):
+    d = load_table(path, 2)
+    x, y = d[:, 0], d[:, 1]
+    m = positive(x, y)
+    x, y = x[m], y[m]
+    peak = int(np.argmax(y))
+    right = peak if p["sk_right_bound_mode"] == "peak" else len(x) - 1
+    rows = []
+    logx = np.log10(x)
+    min_points = int(p["sk_min_points"])
+    for i in range(0, right - min_points + 2):
+        for j in range(i + min_points - 1, right + 1):
+            span = float(logx[j] - logx[i])
+            if span < float(p["sk_min_log10_span"]):
+                continue
+            a, b, rmse, _ = fit_loglog(x[i:j + 1], y[i:j + 1])
+            al = a if j - i + 1 <= 2 else fit_loglog(x[i + 1:j + 1], y[i + 1:j + 1])[0]
+            ar = a if j - i + 1 <= 2 else fit_loglog(x[i:j], y[i:j])[0]
+            da = max(abs(a - al), abs(a - ar))
+            rows.append(dict(i_left=i + 1, i_right=j + 1, n_points=j - i + 1, ka_min=x[i], ka_max=x[j], log10_span=span, alpha_SK=a, RMSE_log=rmse, Delta_alpha=da))
+    if not rows:
+        raise RuntimeError("no valid S(k) window")
+    r0 = scale([r["RMSE_log"] for r in rows])
+    d0 = scale([r["Delta_alpha"] for r in rows])
+    for r in rows:
+        r["Q_SK"] = r["RMSE_log"] / r0 + float(p["sk_eta"]) * r["Delta_alpha"] / d0
+    return sorted(rows, key=lambda z: z["Q_SK"])[0]
+
+
+def local_exponent(x: np.ndarray, y: np.ndarray, w: int):
+    if w % 2 == 0:
+        w += 1
+    h = w // 2
+    idx, cx, pe, err = [], [], [], []
+    for c in range(h, len(x) - h):
+        sl = slice(c - h, c + h + 1)
+        a, _, rmse, _ = fit_loglog(x[sl], y[sl])
+        idx.append(c + 1)
+        cx.append(x[c])
+        pe.append(a)
+        err.append(rmse)
+    return np.asarray(idx), np.asarray(cx), np.asarray(pe), np.asarray(err)
+
+
+def analyze_nv(path: Path, p: dict):
+    d = load_table(path, 2)
+    x, y = d[:, 0], d[:, 1]
+    m = positive(x, y)
+    x, y = x[m], y[m]
+    n_use = min(int(p["nv_n_use"]), len(x))
+    x, y = x[:n_use], y[:n_use]
+    idx, cx, pe, err = local_exponent(x, y, int(p["nv_local_window"]))
+    rows = []
+    mmin = int(p["nv_min_plateau_points"])
+    smin, smax = int(p["nv_search_point_min"]), min(int(p["nv_search_point_max"]), n_use)
+    for i in range(0, len(cx) - mmin + 1):
+        for j in range(i + mmin - 1, len(cx)):
+            if idx[i] < smin or idx[j] > smax:
+                continue
+            span = float(np.log10(cx[j]) - np.log10(cx[i]))
+            if span < float(p["nv_min_log10_span"]):
+                continue
+            rows.append(dict(idx_min=int(idx[i]), idx_max=int(idx[j]), n_center_points=j - i + 1, Rmin_over_a=cx[i], Rmax_over_a=cx[j], log10_span=span, mean_p_eff=float(np.mean(pe[i:j + 1])), std_p_eff=float(np.std(pe[i:j + 1], ddof=1)), mean_local_RMSE=float(np.mean(err[i:j + 1]))))
+    if not rows:
+        raise RuntimeError("no valid number-variance plateau")
+    p0 = scale([r["std_p_eff"] for r in rows])
+    e0 = scale([r["mean_local_RMSE"] for r in rows])
+    for r in rows:
+        r["S_plateau"] = r["std_p_eff"] / p0 + float(p["nv_eta"]) * r["mean_local_RMSE"] / e0
+    best = sorted(rows, key=lambda z: z["S_plateau"])[0]
+    mp = best["mean_p_eff"]
+    if mp <= float(p["nv_p_i_max"]):
+        cls, alpha = "Class I-like", np.nan
+    elif mp >= float(p["nv_p_iii_min"]):
+        cls, alpha = "Class III-like", 2.0 - mp
+    else:
+        cls, alpha = "Class II-like", np.nan
+    best["class"] = cls
+    best["alpha_NV"] = alpha
+    return best
+
+
+def slope_var(x: np.ndarray, y: np.ndarray) -> float:
+    lx = np.log10(x)
+    _, _, _, rv = fit_loglog(x, y)
+    vx = float(np.var(lx))
+    return rv / (vx * max(1, len(x) - 1)) if vx > 0 else np.inf
+
+
+def alpha_from_slope(m: float) -> float:
+    return -2.0 * m - 2.0
+
+
+def local_slope(x: np.ndarray, y: np.ndarray, w: int) -> np.ndarray:
+    if w % 2 == 0:
+        w += 1
+    h = w // 2
+    out = np.full(len(x), np.nan)
+    for c in range(h, len(x) - h):
+        out[c] = fit_loglog(x[c - h:c + h + 1], y[c - h:c + h + 1])[0]
+    return out
+
+
+def spread_fit(tau, y, i, j, key, val):
+    m, b, rmse, rv = fit_loglog(tau[i:j + 1], y[i:j + 1])
+    return dict(i0=i + 1, i1=j + 1, n_points=j - i + 1, tau_min=tau[i], tau_max=tau[j], num_decades=float(np.log10(tau[j] / tau[i])), slope_m=m, alpha_SP=alpha_from_slope(m), RMSE_log=rmse, **{key: val})
+
+
+def analyze_spread(path: Path, p: dict):
+    d = load_table(path, 3)
+    tau, y = d[:, 1], d[:, 2]
+    m = positive(tau, y)
+    tau, y = tau[m], y[m]
+    order = np.argsort(tau)
+    tau, y = tau[order], y[order]
+    tau_trust = float(np.max(tau) / 1.5)
+    valid = np.where(tau <= tau_trust)[0]
+    gbest, gval = None, np.inf
+    for a in range(len(valid)):
+        i = int(valid[a])
+        if tau[i] < float(p["spread_global_tau0_min"]):
+            continue
+        for b in range(a + int(p["spread_global_min_points"]) - 1, len(valid)):
+            j = int(valid[b])
+            if np.log10(tau[j] / tau[i]) < float(p["spread_global_min_fit_decades"]):
+                continue
+            val = slope_var(tau[i:j + 1], y[i:j + 1])
+            if val < gval:
+                gval = val
+                gbest = spread_fit(tau, y, i, j, "min_slope_var", val)
+    if gbest is None:
+        raise RuntimeError("no global spreadability window")
+
+    sl = local_slope(tau[valid], y[valid], int(p["spread_plateau_local_slope_window"]))
+    ae = np.asarray([alpha_from_slope(s) if np.isfinite(s) else np.nan for s in sl])
+    rows = []
+    min_points = int(p["spread_plateau_min_points"])
+    for a in range(len(valid)):
+        i = int(valid[a])
+        if tau[i] < float(p["spread_plateau_tau0_min"]):
+            continue
+        for b in range(a + min_points - 1, len(valid)):
+            j = int(valid[b])
+            dec = float(np.log10(tau[j] / tau[i]))
+            if dec < float(p["spread_plateau_min_fit_decades"]):
+                continue
+            local = ae[a:b + 1]
+            local = local[np.isfinite(local)]
+            if len(local) < max(3, min_points // 2):
+                continue
+            mfit, _, rmse, _ = fit_loglog(tau[i:j + 1], y[i:j + 1])
+            rows.append(dict(i0=i + 1, i1=j + 1, n_points=j - i + 1, tau_min=tau[i], tau_max=tau[j], num_decades=dec, slope_m=mfit, alpha_SP=alpha_from_slope(mfit), RMSE_log=rmse, mean_alpha_eff=float(np.mean(local)), std_alpha_eff=float(np.std(local, ddof=1))))
+    if not rows:
+        raise RuntimeError("no plateau spreadability window")
+    r0 = scale([r["RMSE_log"] for r in rows])
+    a0 = scale([r["std_alpha_eff"] for r in rows])
+    for r in rows:
+        r["Q_t"] = r["RMSE_log"] / r0 + float(p["spread_plateau_eta"]) * r["std_alpha_eff"] / a0
+    pbest = sorted(rows, key=lambda z: z["Q_t"])[0]
+    return gbest, pbest, tau_trust
+
+
+def f(x):
+    try:
+        if not np.isfinite(float(x)):
+            return "nan"
+        return f"{float(x):.6f}"
+    except Exception:
+        return str(x)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.json")
+    args = ap.parse_args()
+    cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    out_dir = Path(cfg["output_dir"])
+    p = cfg["analysis"]
+
+    sk = analyze_sk(out_dir / "SK_ensemble_ka.txt", p)
+    nv = analyze_nv(out_dir / "num_var_ensemble_R_over_a.txt", p)
+    sp_global, sp_plateau, tau_trust = analyze_spread(out_dir / "routeA_pure_directdiffusion_dualfit_protocol" / "sample_ensemble_spreadability.txt", p)
+
+    vals = [sk["alpha_SK"], sp_plateau["alpha_SP"]]
+    labels = ["alpha_SK", "alpha_SP_plateau"]
+    if nv["class"] == "Class III-like" and np.isfinite(nv["alpha_NV"]):
+        vals.append(nv["alpha_NV"])
+        labels.append("alpha_NV")
+    vals = np.asarray(vals, dtype=float)
+    alpha_joint = float(np.mean(vals))
+    u_joint = float(np.sqrt(np.mean((vals - alpha_joint) ** 2)))
+    ref = cfg.get("alpha_reference", None)
+    delta = abs(alpha_joint - float(ref)) if ref is not None else np.nan
+    eps = delta / abs(float(ref)) if ref not in (None, 0) else np.nan
+
+    lines = []
+    lines.append("Combined alpha analysis")
+    lines.append("=" * 72)
+    lines.append(f"case_name: {cfg.get('case_name', '')}")
+    lines.append(f"input_dir: {cfg['input_dir']}")
+    lines.append(f"output_dir: {cfg['output_dir']}")
+    lines.append("")
+    lines.append("Final summary")
+    lines.append("-" * 72)
+    lines.append(f"alpha_SK: {f(sk['alpha_SK'])}")
+    lines.append(f"S(k) window ka: [{f(sk['ka_min'])}, {f(sk['ka_max'])}]")
+    lines.append(f"number_variance_class: {nv['class']}")
+    lines.append(f"mean_p_eff: {f(nv['mean_p_eff'])}")
+    lines.append(f"alpha_NV: {f(nv['alpha_NV'])}")
+    lines.append(f"alpha_SP_plateau: {f(sp_plateau['alpha_SP'])}")
+    lines.append(f"spreadability_plateau_tau: [{f(sp_plateau['tau_min'])}, {f(sp_plateau['tau_max'])}]")
+    lines.append(f"alpha_SP_global_baseline: {f(sp_global['alpha_SP'])}")
+    lines.append(f"joint_contributors: {', '.join(labels)}")
+    lines.append(f"alpha_joint: {f(alpha_joint)}")
+    lines.append(f"u_joint: {f(u_joint)}")
+    lines.append(f"alpha_reference: {f(ref)}")
+    lines.append(f"Delta_alpha_joint: {f(delta)}")
+    lines.append(f"epsilon_joint: {f(eps)}")
+    lines.append(f"epsilon_joint_percent: {f(100 * eps)}")
+    lines.append("")
+    lines.append("S(k)")
+    lines.append(str(sk))
+    lines.append("")
+    lines.append("Number variance")
+    lines.append(str(nv))
+    lines.append("")
+    lines.append("Spreadability")
+    lines.append(str(dict(global_fit=sp_global, plateau_fit=sp_plateau, tau_trust_max=tau_trust)))
+
+    out = out_dir / "combined_alpha_result.txt"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    print(f"saved {out}")
+
+
+if __name__ == "__main__":
+    main()

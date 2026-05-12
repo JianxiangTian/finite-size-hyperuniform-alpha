@@ -1,0 +1,59 @@
+{
+  "case_name": "N200",
+  "input_dir": "data/N200",
+  "output_dir": "results/N200",
+  "density": 1.0,
+  "num_configs": 100,
+  "alpha_reference": 3.0,
+  "coords_are_reduced": true,
+  "auto_length_scale_a": true,
+  "length_scale_a": null,
+  "sk": {
+    "nk": 200,
+    "kbin_factor": 1.0,
+    "max_bins": 1000
+  },
+  "number_variance": {
+    "rbin_fraction": 0.005,
+    "num_samples": 100000,
+    "num_radii": 100,
+    "seed": 12345
+  },
+  "spreadability": {
+    "phi2": 0.05,
+    "diffusion_coefficient": 1.0,
+    "grid_pixels_per_radius": 3.5,
+    "grid_round_to": 64,
+    "grid_min_n": 384,
+    "grid_max_n": 2304,
+    "tau_raw_min": 0.01,
+    "raw_max_factor_over_trust": 1.5,
+    "n_time_per_decade": 90,
+    "n_time_min": 260,
+    "n_time_max": 420,
+    "trust_length_fraction": 0.3
+  },
+  "analysis": {
+    "sk_min_points": 5,
+    "sk_min_log10_span": 0.35,
+    "sk_eta": 1.0,
+    "sk_right_bound_mode": "peak",
+    "nv_n_use": 50,
+    "nv_local_window": 5,
+    "nv_min_plateau_points": 5,
+    "nv_min_log10_span": 0.05,
+    "nv_eta": 1.0,
+    "nv_search_point_min": 30,
+    "nv_search_point_max": 50,
+    "nv_p_i_max": 1.05,
+    "nv_p_iii_min": 1.15,
+    "spread_global_min_fit_decades": 1.0,
+    "spread_global_min_points": 20,
+    "spread_global_tau0_min": 0.01,
+    "spread_plateau_min_fit_decades": 0.25,
+    "spread_plateau_min_points": 25,
+    "spread_plateau_local_slope_window": 17,
+    "spread_plateau_eta": 1.0,
+    "spread_plateau_tau0_min": 1.0
+  }
+}
