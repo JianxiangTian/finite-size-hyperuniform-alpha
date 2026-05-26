@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -43,13 +44,154 @@ def scale(vals):
     return y if y > 0 and np.isfinite(y) else np.finfo(float).eps
 
 
+def moving_average_1d(y: np.ndarray, window: int) -> np.ndarray:
+    """Simple centered moving average used only for locating the pre-peak bound."""
+    w = max(1, int(window))
+    if w <= 1 or y.size < 3:
+        return y.astype(float).copy()
+    if w % 2 == 0:
+        w += 1
+    pad = w // 2
+    yp = np.pad(y.astype(float), (pad, pad), mode="edge")
+    kernel = np.ones(w, dtype=float) / float(w)
+    return np.convolve(yp, kernel, mode="valid")
+
+
+def first_local_log_slope_drop(x: np.ndarray, y: np.ndarray, p: dict, min_right: int) -> Optional[int]:
+    """
+    Find the first point where the low-k branch has crossed toward a plateau.
+
+    This is only a guard against selecting windows in the post-crossover S(k)~O(1) region.
+    It does not determine the final fitting window. The final window is still chosen by the
+    regularized RMSE + boundary-stability score inside the admissible low-k branch.
+    """
+    threshold = p.get("sk_plateau_slope_threshold", None)
+    if threshold is None:
+        return None
+    threshold = float(threshold)
+
+    min_y = float(p.get("sk_plateau_min_y", 0.50))
+    w = int(p.get("sk_plateau_slope_window", 5))
+    if w % 2 == 0:
+        w += 1
+    if w < 5:
+        w = 5
+    if len(x) < w:
+        return None
+
+    half = w // 2
+    for c in range(max(half, min_right), len(x) - half):
+        if y[c] < min_y:
+            continue
+        try:
+            a, _, _, _ = fit_loglog(x[c - half:c + half + 1], y[c - half:c + half + 1])
+        except Exception:
+            continue
+        if np.isfinite(a) and a <= threshold:
+            return c
+    return None
+
+
+def find_sk_admissible_right_bound(x: np.ndarray, y: np.ndarray, p: dict) -> Tuple[int, str]:
+    """
+    Determine the largest index allowed for S(k) fitting.
+
+    The default mode restricts candidate windows to the pre-peak or pre-plateau low-k
+    branch, so that the regularized fit is not attracted by the later S(k)~1 region.
+
+    Config options under analysis:
+        sk_right_bound_mode:
+            "pre_peak"  : default. Use the earliest of first local peak, plateau slope drop,
+                          optional ka max, and optional index max. Exclude the detected
+                          peak/crossover point itself.
+            "peak"      : legacy mode. Use the global maximum index as the right bound.
+            "all"       : scan all positive points.
+            "manual"    : use sk_right_bound_index_1based or sk_right_bound_ka_max.
+
+        sk_peak_smooth_window: default 3.
+        sk_peak_min_index_1based: default sk_min_points + 1. Avoids treating the first
+                                  few noisy points as a peak.
+        sk_plateau_slope_threshold: optional, e.g. 0.15. Disabled by default unless set.
+        sk_plateau_min_y: default 0.50. Used with sk_plateau_slope_threshold.
+        sk_right_bound_ka_max: optional hard upper bound in ka.
+    """
+    n = len(x)
+    if n == 0:
+        raise RuntimeError("empty S(k) data after filtering positive values")
+
+    min_points = int(p.get("sk_min_points", 5))
+    min_allowed_right = min(max(min_points - 1, 0), n - 1)
+    mode = str(p.get("sk_right_bound_mode", "pre_peak")).lower()
+
+    if mode in ("all", "none", "off"):
+        return n - 1, "all_points"
+
+    if mode == "peak":
+        peak = int(np.argmax(y))
+        right = max(min_allowed_right, min(peak, n - 1))
+        return right, f"global_peak_included_at_index_{peak + 1}"
+
+    if mode == "manual":
+        bounds = []
+        if "sk_right_bound_index_1based" in p:
+            bounds.append(int(p["sk_right_bound_index_1based"]) - 1)
+        if "sk_right_bound_ka_max" in p:
+            kk = float(p["sk_right_bound_ka_max"])
+            ind = np.where(x <= kk)[0]
+            if ind.size > 0:
+                bounds.append(int(ind[-1]))
+        if not bounds:
+            raise RuntimeError("manual S(k) right bound requested, but no manual bound was provided")
+        right = max(min_allowed_right, min(min(bounds), n - 1))
+        return right, "manual_bound"
+
+    # Default physical mode: pre-peak or pre-plateau low-k branch.
+    bounds: List[Tuple[int, str]] = []
+
+    # Optional hard ka cutoff, useful for systems where the first peak is broad or absent.
+    if "sk_right_bound_ka_max" in p:
+        kk = float(p["sk_right_bound_ka_max"])
+        ind = np.where(x <= kk)[0]
+        if ind.size > 0:
+            bounds.append((int(ind[-1]), f"ka_max_{kk:g}"))
+
+    # First local peak on a lightly smoothed curve. We exclude the peak itself.
+    smooth_w = int(p.get("sk_peak_smooth_window", 3))
+    ys = moving_average_1d(y, smooth_w)
+    min_peak_1based = int(p.get("sk_peak_min_index_1based", min_points + 1))
+    min_peak_idx = max(min_peak_1based - 1, min_allowed_right)
+    peak_min_y = float(p.get("sk_peak_min_y", 0.0))
+
+    first_peak = None
+    for i in range(max(1, min_peak_idx), n - 1):
+        if ys[i] >= ys[i - 1] and ys[i] >= ys[i + 1] and ys[i] >= peak_min_y:
+            first_peak = i
+            break
+    if first_peak is not None:
+        bounds.append((max(min_allowed_right, first_peak - 1), f"before_first_local_peak_index_{first_peak + 1}"))
+
+    # Optional plateau/crossover detector based on local log slope becoming small.
+    plateau_idx = first_local_log_slope_drop(x, y, p, min_allowed_right)
+    if plateau_idx is not None:
+        bounds.append((max(min_allowed_right, plateau_idx - 1), f"before_plateau_slope_drop_index_{plateau_idx + 1}"))
+
+    if not bounds:
+        # If the curve is still rising and no cutoff was found, use all available points.
+        return n - 1, "no_peak_or_plateau_detected"
+
+    right, reason = min(bounds, key=lambda t: t[0])
+    right = max(min_allowed_right, min(right, n - 1))
+    return right, reason
+
+
 def analyze_sk(path: Path, p: dict):
     d = load_table(path, 2)
     x, y = d[:, 0], d[:, 1]
     m = positive(x, y)
     x, y = x[m], y[m]
-    peak = int(np.argmax(y))
-    right = peak if p["sk_right_bound_mode"] == "peak" else len(x) - 1
+
+    right, right_reason = find_sk_admissible_right_bound(x, y, p)
+
     rows = []
     logx = np.log10(x)
     min_points = int(p["sk_min_points"])
@@ -59,12 +201,28 @@ def analyze_sk(path: Path, p: dict):
             if span < float(p["sk_min_log10_span"]):
                 continue
             a, b, rmse, _ = fit_loglog(x[i:j + 1], y[i:j + 1])
-            al = a if j - i + 1 <= 2 else fit_loglog(x[i + 1:j + 1], y[i + 1:j + 1])[0]
-            ar = a if j - i + 1 <= 2 else fit_loglog(x[i:j], y[i:j])[0]
+            al = a if j - i + 1 <= min_points else fit_loglog(x[i + 1:j + 1], y[i + 1:j + 1])[0]
+            ar = a if j - i + 1 <= min_points else fit_loglog(x[i:j], y[i:j])[0]
             da = max(abs(a - al), abs(a - ar))
-            rows.append(dict(i_left=i + 1, i_right=j + 1, n_points=j - i + 1, ka_min=x[i], ka_max=x[j], log10_span=span, alpha_SK=a, RMSE_log=rmse, Delta_alpha=da))
+            rows.append(dict(
+                i_left=i + 1,
+                i_right=j + 1,
+                n_points=j - i + 1,
+                ka_min=x[i],
+                ka_max=x[j],
+                log10_span=span,
+                alpha_SK=a,
+                RMSE_log=rmse,
+                Delta_alpha=da,
+                sk_admissible_right_index=right + 1,
+                sk_admissible_right_ka=x[right],
+                sk_right_bound_reason=right_reason,
+            ))
     if not rows:
-        raise RuntimeError("no valid S(k) window")
+        raise RuntimeError(
+            "no valid S(k) window inside the admissible pre-peak/pre-plateau low-k range; "
+            "try reducing sk_min_points or sk_min_log10_span, or use sk_right_bound_mode='manual'"
+        )
     r0 = scale([r["RMSE_log"] for r in rows])
     d0 = scale([r["Delta_alpha"] for r in rows])
     for r in rows:
@@ -249,6 +407,8 @@ def main() -> None:
     lines.append("-" * 72)
     lines.append(f"alpha_SK: {f(sk['alpha_SK'])}")
     lines.append(f"S(k) window ka: [{f(sk['ka_min'])}, {f(sk['ka_max'])}]")
+    lines.append(f"S(k) admissible right bound ka: {f(sk.get('sk_admissible_right_ka', np.nan))}")
+    lines.append(f"S(k) right bound reason: {sk.get('sk_right_bound_reason', '')}")
     lines.append(f"number_variance_class: {nv['class']}")
     lines.append(f"mean_p_eff: {f(nv['mean_p_eff'])}")
     lines.append(f"alpha_NV: {f(nv['alpha_NV'])}")

@@ -20,7 +20,7 @@
     "seed": 12345
   },
   "spreadability": {
-    "phi2": 0.05,
+    "phi2": 0.01,
     "diffusion_coefficient": 1.0,
     "grid_pixels_per_radius": 3.5,
     "grid_round_to": 64,
@@ -37,7 +37,7 @@
     "sk_min_points": 5,
     "sk_min_log10_span": 0.35,
     "sk_eta": 1.0,
-    "sk_right_bound_mode": "peak",
+    "sk_right_bound_mode": "pre_peak",
     "nv_n_use": 50,
     "nv_local_window": 5,
     "nv_min_plateau_points": 5,
@@ -54,6 +54,12 @@
     "spread_plateau_min_points": 25,
     "spread_plateau_local_slope_window": 17,
     "spread_plateau_eta": 1.0,
-    "spread_plateau_tau0_min": 1.0
+    "spread_plateau_tau0_min": 1.0,
+    "sk_peak_smooth_window": 3,
+    "sk_peak_min_index_1based": 5,
+    "sk_peak_min_y": 0.0,
+    "sk_plateau_slope_threshold": 0.15,
+    "sk_plateau_min_y": 0.5,
+    "sk_plateau_slope_window": 5
   }
 }
