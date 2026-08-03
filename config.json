@@ -14,13 +14,14 @@
     "max_bins": 1000
   },
   "number_variance": {
+    "enabled": true,
     "rbin_fraction": 0.005,
     "num_samples": 100000,
     "num_radii": 100,
     "seed": 12345
   },
   "spreadability": {
-    "phi2": 0.01,
+    "phi2": 0.005,
     "diffusion_coefficient": 1.0,
     "grid_pixels_per_radius": 3.5,
     "grid_round_to": 64,

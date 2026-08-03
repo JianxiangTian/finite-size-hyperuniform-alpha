@@ -4,49 +4,77 @@ This repository provides the analysis code associated with the manuscript
 
 **Extracting effective scaling exponents in finite-size hyperuniform systems**
 
-The code implements a finite-size protocol for extracting effective scaling exponents from hyperuniform point configurations. The workflow combines three complementary routes:
+The workflow extracts finite-size effective scaling information from three
+complementary observables:
 
-1. static structure factor `S(k)`,
-2. number variance `sigma_N^2(R)`,
-3. spreadability excess `S(infinity) - S(t)`.
+1. the static structure factor `S(k)`;
+2. the number variance `sigma_N^2(R)`;
+3. the spreadability excess `S(infinity) - S(t)`.
 
-The route-specific outputs are then combined into a joint empirical estimate. The reported exponent should be interpreted as a finite-size effective estimate under the specified analysis protocol.
+The default joint empirical estimator combines only the `S(k)` and
+plateau-window spreadability estimates with equal weights:
+
+```text
+alpha_joint = 0.5 * alpha_SK + 0.5 * alpha_SP
+d_method    = 0.5 * abs(alpha_SK - alpha_SP)
+```
+
+Number variance is retained as an independent real-space Class-like reference.
+It is not used in the joint estimator. The traditional global spreadability fit
+is retained as a comparison baseline and is also not used in the joint
+estimator.
+
+The reported exponents are finite-size effective estimates under the specified
+analysis protocol. They should not be interpreted as exact thermodynamic-limit
+asymptotic exponents.
+
+## Frozen analysis hierarchy
+
+| Result | Role |
+| --- | --- |
+| Equal-weight `S(k)` + plateau SP | Default joint estimator |
+| Inverse-variance weighting | Uncertainty-driven sensitivity analysis |
+| Benchmark-error calibration | Retrospective benchmark-only comparison |
+| Number variance | Independent real-space Class-like reference |
+| Traditional global SP fit | Fitting-protocol baseline |
+
+The exact definitions and revision regression targets are recorded in
+[`METHODS_FREEZE.md`](METHODS_FREEZE.md).
 
 ## Repository structure
 
 ```text
 finite_size_hyperuniform_alpha/
 ├── README.md
+├── METHODS_FREEZE.md
+├── RELEASE_MANIFEST.sha256
+├── VERSION
 ├── config.json
 ├── requirements.txt
 ├── run_all.py
 ├── data/
-│   └── N200/
-│       └── config_*_component_0.txt
-└── src/
-    ├── preprocess/
-    │   └── compute_length_scale.py
-    ├── sk/
-    │   └── compute_sk.cpp
-    ├── number_variance/
-    │   └── compute_number_variance.cpp
-    ├── spreadability/
-    │   └── compute_spreadability.py
-    └── analysis/
-        └── combined_alpha_analysis.py
+│   ├── N200/
+│   │   └── config_*_component_0.txt
+│   └── revision_run_level_estimates.csv
+├── src/
+│   ├── preprocess/
+│   │   └── compute_length_scale.py
+│   ├── sk/
+│   │   └── compute_sk.cpp
+│   ├── number_variance/
+│   │   └── compute_number_variance.cpp
+│   ├── spreadability/
+│   │   └── compute_spreadability.py
+│   └── analysis/
+│       ├── combined_alpha_analysis.py
+│       └── paired_bootstrap_joint_estimators.py
+└── tests/
+    └── test_frozen_estimators.py
 ```
 
-## Included example dataset
+## Included data
 
-The folder
-
-```text
-data/N200/
-```
-
-contains a representative example dataset for demonstrating the complete analysis pipeline.
-
-Dataset information:
+`data/N200/` contains a representative configuration dataset:
 
 ```text
 dimension        = 2
@@ -55,153 +83,200 @@ Nc               = 100 configurations
 density          = 1.0
 alpha_reference  = 3.0
 box              = square periodic box
-box length       = sqrt(Np / density)
 coordinates      = reduced coordinates in [0, 1)^2
 ```
 
-Each configuration file is named as
+Each configuration is named `config_i_component_0.txt` and contains two
+coordinate columns.
+
+All input configuration files must contain reduced coordinates in
+`[0, 1)^2`. Absolute-coordinate input is not supported by this frozen release.
+Convert absolute coordinates to reduced coordinates before running the
+workflow. The `coords_are_reduced` field in `config.json` must remain `true`.
+
+`data/revision_run_level_estimates.csv` contains the compact route-level
+results needed to reproduce the weighting and paired-bootstrap calculations:
 
 ```text
-config_i_component_0.txt
+alpha_reference, run, alpha_SK, alpha_SP
 ```
 
-where `i` is the configuration index. Each file contains two columns corresponding to the particle coordinates.
-
-This repository provides the analysis workflow rather than the configuration-generation workflow. Additional benchmark configurations used in the manuscript are available from the corresponding author upon reasonable request.
+The repository provides the analysis workflow rather than the
+configuration-generation workflow. The complete benchmark configuration
+collection is not included because of its size; additional configurations are
+available from the corresponding author upon reasonable request.
 
 ## Requirements
 
-Python packages:
+Python 3.10 or newer is required.
 
-```text
-numpy
-scipy
-```
-
-A C++ compiler is required for the structure-factor and number-variance calculations. The C++ codes are compiled with
-
-```bash
-g++ -O3 -std=c++11
-```
-
-Install the Python requirements with
+Install the Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Run the workflow
+A C++ compiler is required for the structure-factor and number-variance
+calculations. The workflow uses:
 
-From the repository root directory, run
+```bash
+g++ -O3 -std=c++11
+```
+
+## Run the representative workflow
+
+### Quick verification
+
+The recommended quick verification skips the computationally intensive
+number-variance calculation:
+
+```bash
+python run_all.py --config config.json --skip-nv
+```
+
+This still reproduces the two numerical inputs to the joint estimator: the
+`S(k)` and plateau-window spreadability estimates.
+
+### Full three-route workflow
+
+From the repository root:
 
 ```bash
 python run_all.py --config config.json
 ```
 
-This command performs the following steps:
+This computes:
 
-```text
-1. compute the ensemble-averaged nearest-neighbor length scale a
-2. compute the static structure factor S(k)
-3. compute the number variance sigma_N^2(R)
-4. compute the spreadability excess S(infinity) - S(t)
-5. perform the combined route-level analysis
-```
+1. the ensemble-averaged nearest-neighbor length scale `a`;
+2. `S(k)`;
+3. number variance, when enabled;
+4. the spreadability excess;
+5. the final route-level analysis.
 
-The main output file is
+The main outputs are:
 
 ```text
 results/N200/combined_alpha_result.txt
+results/N200/combined_alpha_result.json
 ```
 
-## Output files
+The joint result in both files always uses equal-weight `S(k)` and plateau SP.
+NV cannot enter the combined estimate.
 
-The workflow generates route-specific results in
+The number-variance calculation is computationally dominant and may require
+several minutes or longer, depending on the hardware.
 
-```text
-results/N200/
-```
-
-Representative output files include
-
-```text
-results/N200/a_value.txt
-results/N200/a_value.json
-results/N200/SK_ensemble.txt
-results/N200/SK_ensemble_ka.txt
-results/N200/num_var_ensemble.txt
-results/N200/num_var_ensemble_R_over_a.txt
-results/N200/routeA_pure_directdiffusion_dualfit_protocol/sample_ensemble_spreadability.txt
-results/N200/combined_alpha_result.txt
-```
-
-The file
-
-```text
-combined_alpha_result.txt
-```
-
-reports the route-specific estimates and the joint result, including quantities such as
-
-```text
-alpha_SK
-alpha_SP_plateau
-alpha_NV
-alpha_joint
-u_joint
-Delta_alpha_joint
-epsilon_joint
-```
-
-depending on the diagnosed route availability.
-
-## Configuration file
-
-The main parameters are controlled by
-
-```text
-config.json
-```
-
-Important fields include
-
-```json
-{
-  "case_name": "N200",
-  "input_dir": "data/N200",
-  "output_dir": "results/N200",
-  "density": 1.0,
-  "num_configs": 100,
-  "alpha_reference": 3.0,
-  "coords_are_reduced": true,
-  "auto_length_scale_a": true
-}
-```
-
-Here, `alpha_reference` is used only for benchmark evaluation, such as computing the deviation from the prescribed reference exponent. For systems without a prescribed reference exponent, this field can be set to `null`.
-
-The current example assumes reduced coordinates in `[0, 1)^2`.
-
-## Skipping completed steps
-
-If some route-level observables have already been generated, the corresponding steps can be skipped:
-
-```bash
-python run_all.py --config config.json --skip-sk
-python run_all.py --config config.json --skip-nv
-python run_all.py --config config.json --skip-spreadability
-```
-
-If the length scale `a` has already been computed and `length_scale_a` is manually specified in `config.json`, use
+Other completed calculations may also be skipped:
 
 ```bash
 python run_all.py --config config.json --skip-a
+python run_all.py --config config.json --skip-sk
+python run_all.py --config config.json --skip-spreadability
 ```
 
-Multiple skip options can be combined.
+If `--skip-a` is used without an existing `a_value.json`, set
+`auto_length_scale_a` to `false` and provide `length_scale_a` in `config.json`.
 
-## Notes
+### Expected representative result
 
-The output exponent is protocol-dependent and finite-size dependent. It should not be interpreted as a strict thermodynamic-limit asymptotic exponent.
+For the bundled dataset with `alpha_reference = 3.0`, the full workflow should
+give approximately:
 
-The included dataset is a representative example for demonstrating the three route-specific analyses and the joint empirical estimator.
+```text
+alpha_SK:                 3.119006
+number_variance_class:    Class I-like
+mean_p_eff:               0.944478
+alpha_NV:                 nan
+alpha_SP_plateau:         2.985769
+alpha_joint_equal:        3.052388
+d_method:                 0.066618
+epsilon_joint_percent:    1.7463
+```
+
+Small last-digit differences may occur across platforms and compiler versions.
+Number variance is reported only as an independent Class-like reference and
+never enters `alpha_joint_equal`.
+
+## Reproduce the weighting and bootstrap analysis
+
+Run:
+
+```bash
+python src/analysis/paired_bootstrap_joint_estimators.py \
+  data/revision_run_level_estimates.csv \
+  --output-dir results/repeated_runs \
+  --bootstraps 10000 \
+  --seed 20260730 \
+  --expected-reps 20 \
+  --run-first 1 \
+  --run-last 20 \
+  --save-replicates
+```
+
+The script preserves the `S(k)`-SP pairing within each independent run. For the
+inverse-variance estimator, the variances and weights are recalculated inside
+every bootstrap resample.
+
+Outputs:
+
+```text
+paired_bootstrap_summary.csv
+run_level_with_joint_estimators.csv
+weighting_summary.csv
+estimator_performance.csv
+weight_scan.csv
+paired_bootstrap_replicates.csv.gz
+```
+
+For the frozen revision dataset, the command reproduces:
+
+```text
+default equal weights:                 w_SK = 0.500000
+                                       w_SP = 0.500000
+retrospective error-calibrated weight: w_SK = 0.092728
+                                       w_SP = 0.907272
+```
+
+The principal frozen regression values are:
+
+```text
+SK_route MAE / RMSE:                 0.08544671 / 0.10452717
+SP_plateau_route MAE / RMSE:         0.02068429 / 0.03005389
+equal_weight MAE / RMSE:             0.03549250 / 0.03997623
+inverse_variance MAE / RMSE:         0.04223877 / 0.04912441
+retrospective calibrated w_SK:       0.092728
+95% bootstrap CI for w_SK:           [0.081018, 0.107048]
+```
+
+The calibrated weight uses the known benchmark targets and must not be used as
+the default estimator for an unknown system.
+
+## Configuration
+
+The route and analysis parameters are controlled by `config.json`.
+`alpha_reference` is used only for benchmark evaluation. Set it to `null` for
+a system without a prescribed target exponent.
+
+Number variance can be disabled without changing the joint estimator:
+
+```json
+{
+  "number_variance": {
+    "enabled": false
+  }
+}
+```
+
+## Tests
+
+Run the lightweight estimator tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Verify the integrity of the frozen release files with:
+
+```bash
+sha256sum -c RELEASE_MANIFEST.sha256
+```

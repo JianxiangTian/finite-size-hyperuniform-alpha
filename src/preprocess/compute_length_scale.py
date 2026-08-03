@@ -54,7 +54,11 @@ def main() -> None:
     files = files[:n_cfg]
 
     density = float(cfg["density"])
-    reduced = bool(cfg.get("coords_are_reduced", True))
+    if cfg.get("coords_are_reduced", True) is not True:
+        raise ValueError(
+            "Only reduced coordinates in [0, 1)^2 are supported by this release."
+        )
+    reduced = True
 
     vals = []
     L_vals = []

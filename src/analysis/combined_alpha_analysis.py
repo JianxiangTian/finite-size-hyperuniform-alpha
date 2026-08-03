@@ -201,8 +201,11 @@ def analyze_sk(path: Path, p: dict):
             if span < float(p["sk_min_log10_span"]):
                 continue
             a, b, rmse, _ = fit_loglog(x[i:j + 1], y[i:j + 1])
-            al = a if j - i + 1 <= min_points else fit_loglog(x[i + 1:j + 1], y[i + 1:j + 1])[0]
-            ar = a if j - i + 1 <= min_points else fit_loglog(x[i:j], y[i:j])[0]
+            # Boundary sensitivity is evaluated for every admissible window,
+            # including the shortest five-point windows.  The endpoint-deleted
+            # fits then contain four points and remain well defined.
+            al = fit_loglog(x[i + 1:j + 1], y[i + 1:j + 1])[0]
+            ar = fit_loglog(x[i:j], y[i:j])[0]
             da = max(abs(a - al), abs(a - ar))
             rows.append(dict(
                 i_left=i + 1,
@@ -309,14 +312,21 @@ def spread_fit(tau, y, i, j, key, val):
     return dict(i0=i + 1, i1=j + 1, n_points=j - i + 1, tau_min=tau[i], tau_max=tau[j], num_decades=float(np.log10(tau[j] / tau[i])), slope_m=m, alpha_SP=alpha_from_slope(m), RMSE_log=rmse, **{key: val})
 
 
-def analyze_spread(path: Path, p: dict):
+def analyze_spread(
+    path: Path,
+    p: dict,
+    raw_max_factor_over_trust: float,
+):
     d = load_table(path, 3)
     tau, y = d[:, 1], d[:, 2]
     m = positive(tau, y)
     tau, y = tau[m], y[m]
     order = np.argsort(tau)
     tau, y = tau[order], y[order]
-    tau_trust = float(np.max(tau) / 1.5)
+    raw_factor = float(raw_max_factor_over_trust)
+    if raw_factor <= 0.0:
+        raise ValueError("raw_max_factor_over_trust must be positive")
+    tau_trust = float(np.max(tau) / raw_factor)
     valid = np.where(tau <= tau_trust)[0]
     gbest, gval = None, np.inf
     for a in range(len(valid)):
@@ -372,6 +382,19 @@ def f(x):
         return str(x)
 
 
+def jsonable(value):
+    """Convert nested NumPy results into strict, portable JSON values."""
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.json")
@@ -381,19 +404,27 @@ def main() -> None:
     p = cfg["analysis"]
 
     sk = analyze_sk(out_dir / "SK_ensemble_ka.txt", p)
-    nv = analyze_nv(out_dir / "num_var_ensemble_R_over_a.txt", p)
-    sp_global, sp_plateau, tau_trust = analyze_spread(out_dir / "routeA_pure_directdiffusion_dualfit_protocol" / "sample_ensemble_spreadability.txt", p)
+    nv_path = out_dir / "num_var_ensemble_R_over_a.txt"
+    nv_enabled = bool(cfg.get("number_variance", {}).get("enabled", True))
+    nv = analyze_nv(nv_path, p) if nv_enabled and nv_path.is_file() else None
+    sp_global, sp_plateau, tau_trust = analyze_spread(
+        out_dir
+        / "routeA_pure_directdiffusion_dualfit_protocol"
+        / "sample_ensemble_spreadability.txt",
+        p,
+        cfg["spreadability"]["raw_max_factor_over_trust"],
+    )
 
-    vals = [sk["alpha_SK"], sp_plateau["alpha_SP"]]
+    # Frozen default estimator: equal-weight S(k) + plateau spreadability.
+    # Number variance is an independent real-space Class-like reference and
+    # never contributes to the combined exponent.
+    alpha_sk = float(sk["alpha_SK"])
+    alpha_sp = float(sp_plateau["alpha_SP"])
+    alpha_joint_equal = 0.5 * (alpha_sk + alpha_sp)
+    d_method = 0.5 * abs(alpha_sk - alpha_sp)
     labels = ["alpha_SK", "alpha_SP_plateau"]
-    if nv["class"] == "Class III-like" and np.isfinite(nv["alpha_NV"]):
-        vals.append(nv["alpha_NV"])
-        labels.append("alpha_NV")
-    vals = np.asarray(vals, dtype=float)
-    alpha_joint = float(np.mean(vals))
-    u_joint = float(np.sqrt(np.mean((vals - alpha_joint) ** 2)))
     ref = cfg.get("alpha_reference", None)
-    delta = abs(alpha_joint - float(ref)) if ref is not None else np.nan
+    delta = abs(alpha_joint_equal - float(ref)) if ref is not None else np.nan
     eps = delta / abs(float(ref)) if ref not in (None, 0) else np.nan
 
     lines = []
@@ -409,15 +440,22 @@ def main() -> None:
     lines.append(f"S(k) window ka: [{f(sk['ka_min'])}, {f(sk['ka_max'])}]")
     lines.append(f"S(k) admissible right bound ka: {f(sk.get('sk_admissible_right_ka', np.nan))}")
     lines.append(f"S(k) right bound reason: {sk.get('sk_right_bound_reason', '')}")
-    lines.append(f"number_variance_class: {nv['class']}")
-    lines.append(f"mean_p_eff: {f(nv['mean_p_eff'])}")
-    lines.append(f"alpha_NV: {f(nv['alpha_NV'])}")
+    if nv is not None:
+        lines.append(f"number_variance_role: independent real-space Class-like reference")
+        lines.append(f"number_variance_class: {nv['class']}")
+        lines.append(f"mean_p_eff: {f(nv['mean_p_eff'])}")
+        lines.append(f"alpha_NV: {f(nv['alpha_NV'])}")
+    else:
+        lines.append("number_variance_role: not evaluated; never used in the joint estimator")
     lines.append(f"alpha_SP_plateau: {f(sp_plateau['alpha_SP'])}")
     lines.append(f"spreadability_plateau_tau: [{f(sp_plateau['tau_min'])}, {f(sp_plateau['tau_max'])}]")
     lines.append(f"alpha_SP_global_baseline: {f(sp_global['alpha_SP'])}")
+    lines.append("alpha_SP_global_role: traditional fitting baseline only")
     lines.append(f"joint_contributors: {', '.join(labels)}")
-    lines.append(f"alpha_joint: {f(alpha_joint)}")
-    lines.append(f"u_joint: {f(u_joint)}")
+    lines.append("joint_weight_SK: 0.500000")
+    lines.append("joint_weight_SP: 0.500000")
+    lines.append(f"alpha_joint_equal: {f(alpha_joint_equal)}")
+    lines.append(f"d_method: {f(d_method)}")
     lines.append(f"alpha_reference: {f(ref)}")
     lines.append(f"Delta_alpha_joint: {f(delta)}")
     lines.append(f"epsilon_joint: {f(eps)}")
@@ -426,15 +464,44 @@ def main() -> None:
     lines.append("S(k)")
     lines.append(str(sk))
     lines.append("")
-    lines.append("Number variance")
-    lines.append(str(nv))
-    lines.append("")
+    if nv is not None:
+        lines.append("Number variance (independent reference)")
+        lines.append(str(nv))
+        lines.append("")
     lines.append("Spreadability")
     lines.append(str(dict(global_fit=sp_global, plateau_fit=sp_plateau, tau_trust_max=tau_trust)))
 
     out = out_dir / "combined_alpha_result.txt"
     out.write_text("\n".join(lines), encoding="utf-8")
+    result = {
+        "case_name": cfg.get("case_name", ""),
+        "alpha_reference": ref,
+        "alpha_SK": alpha_sk,
+        "alpha_SP_plateau": alpha_sp,
+        "alpha_SP_global_baseline": float(sp_global["alpha_SP"]),
+        "alpha_joint_equal": alpha_joint_equal,
+        "joint_weight_SK": 0.5,
+        "joint_weight_SP": 0.5,
+        "d_method": d_method,
+        "Delta_alpha_joint": delta,
+        "epsilon_joint": eps,
+        "joint_contributors": labels,
+        "number_variance_role": "independent real-space Class-like reference",
+        "S_k": sk,
+        "number_variance": nv,
+        "spreadability": {
+            "plateau_fit": sp_plateau,
+            "traditional_global_baseline": sp_global,
+            "tau_trust_max": tau_trust,
+        },
+    }
+    json_out = out_dir / "combined_alpha_result.json"
+    json_out.write_text(
+        json.dumps(jsonable(result), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     print(f"saved {out}")
+    print(f"saved {json_out}")
 
 
 if __name__ == "__main__":
